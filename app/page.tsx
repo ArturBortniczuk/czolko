@@ -40,19 +40,19 @@ interface GameData {
 
 export default function MultiplayerGame() {
   // Stan lokalny
-  const [gameCode, setGameCode] = useState<string>('');
-  const [playerName, setPlayerName] = useState<string>('');
-  const [joinCode, setJoinCode] = useState<string>('');
-  const [isHost, setIsHost] = useState<boolean>(false);
+  const [gameCode, setGameCode] = useState('');
+  const [playerName, setPlayerName] = useState('');
+  const [joinCode, setJoinCode] = useState('');
+  const [isHost, setIsHost] = useState(false);
   const [gameData, setGameData] = useState<GameData | null>(null);
-  const [copied, setCopied] = useState<boolean>(false);
+  const [copied, setCopied] = useState(false);
   
   // Stan setup
-  const [myPasswords, setMyPasswords] = useState<string>('');
+  const [myPasswords, setMyPasswords] = useState('');
   
   // Stan gry
-  const [currentQuestion, setCurrentQuestion] = useState<string>('');
-  const [answerText, setAnswerText] = useState<string>('');
+  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [answerText, setAnswerText] = useState('');
   const [showPasswords, setShowPasswords] = useState<{ [key: string]: boolean }>({});
   const [activeTab, setActiveTab] = useState<'game' | 'passwords' | 'history'>('game');
 
