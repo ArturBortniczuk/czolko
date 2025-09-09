@@ -40,19 +40,19 @@ interface GameData {
 
 export default function MultiplayerGame() {
   // Stan lokalny
-  const [gameCode, setGameCode] = useState('');
-  const [playerName, setPlayerName] = useState('');
-  const [joinCode, setJoinCode] = useState('');
-  const [isHost, setIsHost] = useState(false);
+  const [gameCode, setGameCode] = useState<string>('');
+  const [playerName, setPlayerName] = useState<string>('');
+  const [joinCode, setJoinCode] = useState<string>('');
+  const [isHost, setIsHost] = useState<boolean>(false);
   const [gameData, setGameData] = useState<GameData | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<boolean>(false);
   
   // Stan setup
-  const [myPasswords, setMyPasswords] = useState('');
+  const [myPasswords, setMyPasswords] = useState<string>('');
   
   // Stan gry
-  const [currentQuestion, setCurrentQuestion] = useState('');
-  const [answerText, setAnswerText] = useState('');
+  const [currentQuestion, setCurrentQuestion] = useState<string>('');
+  const [answerText, setAnswerText] = useState<string>('');
   const [showPasswords, setShowPasswords] = useState<{ [key: string]: boolean }>({});
   const [activeTab, setActiveTab] = useState<'game' | 'passwords' | 'history'>('game');
 
@@ -706,7 +706,7 @@ export default function MultiplayerGame() {
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      value={currentQuestion}
+                      value={currentQuestion || ''}
                       onChange={(e) => setCurrentQuestion(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && askQuestion()}
                       placeholder="Zadaj pytanie do wszystkich..."
