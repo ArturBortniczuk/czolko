@@ -5,37 +5,37 @@ import { database, gameUtils } from '../lib/firebase';
 import { ref, onValue, off, push, set } from 'firebase/database';
 import { 
   Play, Users, Eye, EyeOff, Trophy, Copy, Check, 
-  MessageCircle, Send, Crown, UserPlus 
+  MessageCircle, Send, Crown, UserPlus, Plus, History, Target
 } from 'lucide-react';
 
 type GameState = 'lobby' | 'setup' | 'playing' | 'finished';
 
 interface Player {
   name: string;
-  password: string;
   isHost: boolean;
   joinedAt: number;
+  passwords: string[];
+  assignedPassword?: string;
+  setupComplete?: boolean;
 }
 
-interface Message {
+interface Question {
+  id: string;
   player: string;
-  target?: string;
   question: string;
-  answer?: string;
-  password?: string;
-  type: 'question' | 'answered' | 'win';
+  answers: { [playerName: string]: string };
   timestamp: number;
+  isComplete: boolean;
 }
 
 interface GameData {
   host: string;
   state: GameState;
   players: { [key: string]: Player };
-  passwords: string[];
-  conversation: Message[];
+  questions: { [id: string]: Question };
   activePlayerIndex: number;
   winner: string | null;
-  assignedPasswords?: { [key: string]: string };
+  currentQuestionId?: string;
 }
 
 export default function MultiplayerGame() {
@@ -47,14 +47,14 @@ export default function MultiplayerGame() {
   const [gameData, setGameData] = useState<GameData | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   
-  // Stan setup (tylko dla hosta)
-  const [passwordPool, setPasswordPool] = useState<string>('');
+  // Stan setup
+  const [myPasswords, setMyPasswords] = useState<string>('');
   
   // Stan gry
   const [currentQuestion, setCurrentQuestion] = useState<string>('');
-  const [targetPlayer, setTargetPlayer] = useState<string>('');
   const [answerText, setAnswerText] = useState<string>('');
   const [showPasswords, setShowPasswords] = useState<{ [key: string]: boolean }>({});
+  const [activeTab, setActiveTab] = useState<'game' | 'passwords' | 'history'>('game');
 
   // Nasłuchiwanie zmian w grze
   useEffect(() => {
@@ -112,34 +112,108 @@ export default function MultiplayerGame() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Rozpoczęcie gry (tylko host)
-  const startGame = async () => {
+  // Przejście do fazy setup
+  const moveToSetup = async () => {
     if (!gameData || !isHost) return;
+    
+    if (Object.keys(gameData.players).length < 2) {
+      alert('Potrzeba przynajmniej 2 graczy!');
+      return;
+    }
 
-    const passwords = passwordPool
+    const updatedGameData = {
+      ...gameData,
+      state: 'setup' as GameState
+    };
+
+    await gameUtils.updateGameState(gameCode, updatedGameData);
+  };
+
+  // Zapisywanie haseł gracza
+  const saveMyPasswords = async () => {
+    if (!gameData || !myPasswords.trim()) {
+      alert('Wpisz przynajmniej jedno hasło!');
+      return;
+    }
+
+    const passwords = myPasswords
       .split('\n')
       .map(p => p.trim())
       .filter(p => p.length > 0);
 
-    if (passwords.length < Object.keys(gameData.players).length) {
-      alert('Za mało haseł! Dodaj więcej haseł niż graczy.');
+    if (passwords.length === 0) {
+      alert('Wpisz przynajmniej jedno hasło!');
       return;
     }
 
-    // Przypisz hasła graczom
-    const playerNames = Object.keys(gameData.players);
-    const shuffledPasswords = [...passwords].sort(() => Math.random() - 0.5);
-    const assignedPasswords: { [key: string]: string } = {};
+    const playerRef = ref(database, `games/${gameCode}/players/${playerName}`);
+    await set(playerRef, {
+      ...gameData.players[playerName],
+      passwords: passwords,
+      setupComplete: true
+    });
+  };
+
+  // Rozpoczęcie gry (gdy wszyscy skończyli setup)
+  const startGame = async () => {
+    if (!gameData || !isHost) return;
+
+    // Sprawdź czy wszyscy gracze skończyli setup
+    const players = Object.values(gameData.players);
+    const allComplete = players.every(p => p.setupComplete);
     
-    playerNames.forEach((name, index) => {
-      assignedPasswords[name] = shuffledPasswords[index];
+    if (!allComplete) {
+      alert('Nie wszyscy gracze skończyli dodawanie haseł!');
+      return;
+    }
+
+    // Zbierz wszystkie hasła
+    const allPasswords: string[] = [];
+    const passwordOwners: { [password: string]: string } = {};
+    
+    players.forEach(player => {
+      if (player.passwords) {
+        player.passwords.forEach(password => {
+          allPasswords.push(password);
+          passwordOwners[password] = player.name;
+        });
+      }
+    });
+
+    if (allPasswords.length < players.length) {
+      alert('Za mało haseł! Każdy gracz powinien dodać przynajmniej jedno hasło.');
+      return;
+    }
+
+    // Przypisz hasła graczom (każdy dostaje hasło innego gracza)
+    const playerNames = Object.keys(gameData.players);
+    const updatedPlayers = { ...gameData.players };
+    
+    playerNames.forEach(playerName => {
+      // Znajdź hasła które NIE należą do tego gracza
+      const availablePasswords = allPasswords.filter(password => 
+        passwordOwners[password] !== playerName
+      );
+      
+      if (availablePasswords.length > 0) {
+        // Losuj hasło
+        const randomPassword = availablePasswords[Math.floor(Math.random() * availablePasswords.length)];
+        updatedPlayers[playerName] = {
+          ...updatedPlayers[playerName],
+          assignedPassword: randomPassword
+        };
+        
+        // Usuń to hasło z dostępnych
+        const passwordIndex = allPasswords.indexOf(randomPassword);
+        allPasswords.splice(passwordIndex, 1);
+      }
     });
 
     const updatedGameData = {
       ...gameData,
       state: 'playing' as GameState,
-      passwords,
-      assignedPasswords,
+      players: updatedPlayers,
+      questions: {},
       activePlayerIndex: 0
     };
 
@@ -148,13 +222,14 @@ export default function MultiplayerGame() {
 
   // Zadawanie pytania
   const askQuestion = async () => {
-    if (!currentQuestion.trim() || !targetPlayer || !gameData) return;
+    if (!currentQuestion.trim() || !gameData) return;
 
-    const askingPlayer = playerName;
-    const targetPassword = gameData.assignedPasswords?.[targetPlayer] || '';
-
+    const questionId = Date.now().toString();
+    const playerNames = Object.keys(gameData.players);
+    
     // Sprawdź czy gracz zgadł hasło
-    const foundWords = targetPassword.toLowerCase().split(' ');
+    const myPassword = gameData.players[playerName]?.assignedPassword || '';
+    const foundWords = myPassword.toLowerCase().split(' ');
     const questionWords = currentQuestion.toLowerCase().split(' ');
     const foundWord = foundWords.find(word => 
       questionWords.some(qWord => qWord.includes(word) && word.length > 2)
@@ -162,74 +237,84 @@ export default function MultiplayerGame() {
 
     if (foundWord) {
       // Gracz wygrał!
-      const winMessage: Message = {
-        player: askingPlayer,
-        target: targetPlayer,
-        question: currentQuestion,
-        answer: `Trafiłeś słowo "${foundWord}" z hasła "${targetPassword}"!`,
-        password: targetPassword,
-        type: 'win',
-        timestamp: Date.now()
-      };
-
-      await gameUtils.addMessage(gameCode, winMessage);
-      
       const updatedGameData = {
         ...gameData,
         state: 'finished' as GameState,
-        winner: askingPlayer
+        winner: playerName
       };
       await gameUtils.updateGameState(gameCode, updatedGameData);
-    } else {
-      // Normalne pytanie
-      const message: Message = {
-        player: askingPlayer,
-        target: targetPlayer,
-        question: currentQuestion,
-        type: 'question',
-        timestamp: Date.now()
-      };
-
-      await gameUtils.addMessage(gameCode, message);
+      return;
     }
 
+    // Stwórz nowe pytanie
+    const newQuestion: Question = {
+      id: questionId,
+      player: playerName,
+      question: currentQuestion,
+      answers: {},
+      timestamp: Date.now(),
+      isComplete: false
+    };
+
+    const updatedQuestions = {
+      ...gameData.questions,
+      [questionId]: newQuestion
+    };
+
+    const updatedGameData = {
+      ...gameData,
+      questions: updatedQuestions,
+      currentQuestionId: questionId
+    };
+
+    await gameUtils.updateGameState(gameCode, updatedGameData);
     setCurrentQuestion('');
-    setTargetPlayer('');
   };
 
   // Odpowiadanie na pytanie
-  const answerQuestion = async (answer: string) => {
-    if (!gameData) return;
+  const answerQuestion = async (questionId: string, answer: string) => {
+    if (!gameData || !answer.trim()) return;
 
-    const conversation = Object.values(gameData.conversation || {});
-    const lastQuestion = conversation[conversation.length - 1];
-    
-    if (lastQuestion && lastQuestion.type === 'question') {
-      const answeredMessage: Message = {
-        ...lastQuestion,
-        answer: answer,
-        type: 'answered'
+    const question = gameData.questions[questionId];
+    if (!question) return;
+
+    const updatedAnswers = {
+      ...question.answers,
+      [playerName]: answer
+    };
+
+    const playerNames = Object.keys(gameData.players);
+    const expectedAnswerers = playerNames.filter(name => name !== question.player);
+    const isComplete = expectedAnswerers.every(name => updatedAnswers[name]);
+
+    const updatedQuestion = {
+      ...question,
+      answers: updatedAnswers,
+      isComplete
+    };
+
+    const updatedQuestions = {
+      ...gameData.questions,
+      [questionId]: updatedQuestion
+    };
+
+    let updatedGameData = {
+      ...gameData,
+      questions: updatedQuestions
+    };
+
+    // Jeśli wszyscy odpowiedzieli, przejdź do następnego gracza
+    if (isComplete) {
+      const currentIndex = gameData.activePlayerIndex;
+      const nextIndex = (currentIndex + 1) % playerNames.length;
+      updatedGameData = {
+        ...updatedGameData,
+        activePlayerIndex: nextIndex,
+        currentQuestionId: undefined
       };
-
-      // Usuń stare pytanie i dodaj odpowiedź
-      const gameRef = ref(database, `games/${gameCode}`);
-      const conversationRef = ref(database, `games/${gameCode}/conversation`);
-      
-      // Aktualizuj indeks aktywnego gracza
-      const playerNames = Object.keys(gameData.players);
-      const newActiveIndex = (gameData.activePlayerIndex + 1) % playerNames.length;
-      
-      const updatedGameData = {
-        ...gameData,
-        activePlayerIndex: newActiveIndex
-      };
-
-      await Promise.all([
-        push(conversationRef, answeredMessage),
-        set(gameRef, updatedGameData)
-      ]);
     }
 
+    await gameUtils.updateGameState(gameCode, updatedGameData);
     setAnswerText('');
   };
 
@@ -246,36 +331,37 @@ export default function MultiplayerGame() {
     setGameCode('');
     setGameData(null);
     setIsHost(false);
-    setPasswordPool('');
+    setMyPasswords('');
     setShowPasswords({});
+    setActiveTab('game');
   };
 
   if (!gameCode) {
     // Ekran lobby
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-100 via-indigo-200 to-purple-300 p-6">
+      <div className="min-h-screen bg-gradient-to-br from-purple-600 via-blue-600 to-teal-500 p-6">
         <div className="max-w-md mx-auto">
           <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold text-gray-800 mb-4">🎯 Gra Online</h1>
-            <p className="text-gray-600">Multiplayer w zgadywanie haseł</p>
+            <h1 className="text-4xl font-bold text-white mb-4">🎯 Gra Online</h1>
+            <p className="text-blue-100">Multiplayer w zgadywanie haseł</p>
           </div>
 
-          <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-8 border border-white/50 shadow-2xl space-y-6">
+          <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20 space-y-6">
             <div>
-              <label className="block text-gray-700 font-semibold mb-3">Twój nick:</label>
+              <label className="block text-white font-medium mb-2">Twój nick:</label>
               <input
                 type="text"
                 value={playerName}
                 onChange={(e) => setPlayerName(e.target.value)}
                 placeholder="Wpisz swój nick..."
-                className="w-full px-4 py-3 rounded-xl bg-white/60 text-gray-800 placeholder-gray-500 border border-gray-300 focus:outline-none focus:ring-3 focus:ring-blue-400 focus:border-blue-400 shadow-lg"
+                className="w-full px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300"
               />
             </div>
 
             <div className="space-y-4">
               <button
                 onClick={createGame}
-                className="w-full px-6 py-4 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white rounded-xl font-bold text-lg transition-all duration-300 flex items-center justify-center gap-2 shadow-xl hover:shadow-2xl transform hover:-translate-y-1"
+                className="w-full px-6 py-4 bg-green-500 hover:bg-green-600 text-white rounded-xl font-bold text-lg transition-colors flex items-center justify-center gap-2"
               >
                 <Crown size={20} />
                 Stwórz Nową Grę
@@ -283,10 +369,10 @@ export default function MultiplayerGame() {
 
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-gray-300"></div>
+                  <div className="w-full border-t border-white/30"></div>
                 </div>
                 <div className="relative flex justify-center text-sm">
-                  <span className="px-4 bg-gradient-to-br from-blue-100 via-indigo-200 to-purple-300 text-gray-600 font-medium">lub</span>
+                  <span className="px-2 bg-gradient-to-br from-purple-600 via-blue-600 to-teal-500 text-white">lub</span>
                 </div>
               </div>
 
@@ -296,11 +382,11 @@ export default function MultiplayerGame() {
                   value={joinCode}
                   onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
                   placeholder="Kod gry..."
-                  className="w-full px-4 py-3 rounded-xl bg-white/60 text-gray-800 placeholder-gray-500 border border-gray-300 focus:outline-none focus:ring-3 focus:ring-blue-400 focus:border-blue-400 shadow-lg mb-3"
+                  className="w-full px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300 mb-3"
                 />
                 <button
                   onClick={joinGame}
-                  className="w-full px-6 py-4 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white rounded-xl font-bold text-lg transition-all duration-300 flex items-center justify-center gap-2 shadow-xl hover:shadow-2xl transform hover:-translate-y-1"
+                  className="w-full px-6 py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-bold text-lg transition-colors flex items-center justify-center gap-2"
                 >
                   <UserPlus size={20} />
                   Dołącz do Gry
@@ -315,8 +401,8 @@ export default function MultiplayerGame() {
 
   if (!gameData) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-100 via-indigo-200 to-purple-300 flex items-center justify-center">
-        <div className="text-gray-700 text-xl font-semibold">Ładowanie gry...</div>
+      <div className="min-h-screen bg-gradient-to-br from-purple-600 via-blue-600 to-teal-500 flex items-center justify-center">
+        <div className="text-white text-xl">Ładowanie gry...</div>
       </div>
     );
   }
@@ -324,78 +410,58 @@ export default function MultiplayerGame() {
   if (gameData.state === 'lobby') {
     // Lobby - czekanie na graczy
     return (
-      <div className="min-h-screen bg-gradient-to-br from-emerald-100 via-blue-200 to-purple-200 p-6">
+      <div className="min-h-screen bg-gradient-to-br from-purple-600 via-blue-600 to-teal-500 p-6">
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold text-gray-800 mb-4">🎯 Lobby Gry</h1>
+            <h1 className="text-4xl font-bold text-white mb-4">🎯 Lobby Gry</h1>
             <div className="flex items-center justify-center gap-2 mb-4">
-              <span className="text-gray-600">Kod gry:</span>
-              <span className="text-2xl font-bold text-purple-700">{gameCode}</span>
+              <span className="text-blue-100">Kod gry:</span>
+              <span className="text-2xl font-bold text-yellow-300">{gameCode}</span>
               <button
                 onClick={copyGameCode}
-                className="px-3 py-1 bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-600 hover:to-indigo-700 text-white rounded-lg transition-all duration-300 flex items-center gap-1 shadow-lg transform hover:-translate-y-0.5"
+                className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors flex items-center gap-1"
               >
                 {copied ? <Check size={16} /> : <Copy size={16} />}
                 {copied ? 'Skopiowano!' : 'Kopiuj'}
               </button>
             </div>
-            <p className="text-gray-600">Podeślij kod znajomym żeby dołączyli!</p>
+            <p className="text-blue-100">Podeślij kod znajomym żeby dołączyli!</p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-8">
-            {/* Lista graczy */}
-            <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-6 border border-white/50 shadow-2xl">
-              <div className="flex items-center gap-2 mb-6">
-                <Users className="text-gray-700" size={24} />
-                <h2 className="text-2xl font-semibold text-gray-800">Gracze ({Object.keys(gameData.players).length})</h2>
-              </div>
-
-              <div className="space-y-3">
-                {Object.values(gameData.players).map((player) => (
-                  <div key={player.name} className="flex items-center justify-between bg-gradient-to-r from-white/60 to-white/40 rounded-xl px-4 py-3 shadow-lg border border-white/30">
-                    <span className="text-gray-800 font-medium flex items-center gap-2">
-                      {player.isHost && <Crown size={16} className="text-amber-500" />}
-                      {player.name}
-                      {player.isHost && <span className="text-amber-600 text-sm">(Host)</span>}
-                    </span>
-                  </div>
-                ))}
-              </div>
+          <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+            <div className="flex items-center gap-2 mb-6">
+              <Users className="text-white" size={24} />
+              <h2 className="text-2xl font-semibold text-white">Gracze ({Object.keys(gameData.players).length})</h2>
             </div>
 
-            {/* Setup haseł (tylko host) */}
-            {isHost && (
-              <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-6 border border-white/50 shadow-2xl">
-                <h2 className="text-2xl font-semibold text-gray-800 mb-6">📝 Pula Haseł</h2>
-                <textarea
-                  value={passwordPool}
-                  onChange={(e) => setPasswordPool(e.target.value)}
-                  placeholder="Wpisz hasła, każde w nowej linii:&#10;Drzewo&#10;Samochód&#10;Książka&#10;..."
-                  rows={10}
-                  className="w-full px-4 py-3 rounded-xl bg-white/60 text-gray-800 placeholder-gray-500 border border-gray-300 focus:outline-none focus:ring-3 focus:ring-blue-400 focus:border-blue-400 resize-none shadow-lg"
-                />
-                <p className="text-gray-600 text-sm mt-2">
-                  {passwordPool.split('\n').filter(p => p.trim()).length} haseł w puli
-                </p>
+            <div className="space-y-3 mb-6">
+              {Object.values(gameData.players).map((player) => (
+                <div key={player.name} className="flex items-center justify-between bg-white/20 rounded-lg px-4 py-3">
+                  <span className="text-white font-medium flex items-center gap-2">
+                    {player.isHost && <Crown size={16} className="text-yellow-300" />}
+                    {player.name}
+                    {player.isHost && <span className="text-yellow-300 text-sm">(Host)</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
 
-                <button
-                  onClick={startGame}
-                  disabled={Object.keys(gameData.players).length < 2 || passwordPool.split('\n').filter(p => p.trim()).length < Object.keys(gameData.players).length}
-                  className="w-full mt-4 px-6 py-4 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed text-white rounded-xl font-bold text-lg transition-all duration-300 flex items-center justify-center gap-2 shadow-xl hover:shadow-2xl transform hover:-translate-y-1 disabled:transform-none"
-                >
-                  <Play size={20} />
-                  Rozpocznij Grę!
-                </button>
-              </div>
+            {isHost && (
+              <button
+                onClick={moveToSetup}
+                disabled={Object.keys(gameData.players).length < 2}
+                className="w-full px-6 py-4 bg-green-500 hover:bg-green-600 disabled:bg-gray-500 disabled:cursor-not-allowed text-white rounded-xl font-bold text-lg transition-colors flex items-center justify-center gap-2"
+              >
+                <Play size={20} />
+                Przejdź do Dodawania Haseł
+              </button>
             )}
 
             {!isHost && (
-              <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-6 border border-white/50 shadow-2xl flex items-center justify-center">
-                <div className="text-center">
-                  <Crown className="mx-auto text-amber-500 mb-4" size={48} />
-                  <h3 className="text-xl font-semibold text-gray-800 mb-2">Czekamy na hosta</h3>
-                  <p className="text-gray-600">{gameData.host} przygotowuje hasła...</p>
-                </div>
+              <div className="text-center">
+                <Crown className="mx-auto text-yellow-300 mb-4" size={48} />
+                <h3 className="text-xl font-semibold text-white mb-2">Czekamy na hosta</h3>
+                <p className="text-blue-200">{gameData.host} rozpocznie dodawanie haseł...</p>
               </div>
             )}
           </div>
@@ -404,158 +470,105 @@ export default function MultiplayerGame() {
     );
   }
 
-  if (gameData.state === 'playing') {
-    // Gra w toku
-    const playerNames = Object.keys(gameData.players);
-    const currentActivePlayer = playerNames[gameData.activePlayerIndex];
-    const conversation = Object.values(gameData.conversation || {}).sort((a, b) => a.timestamp - b.timestamp);
-    const lastQuestion = conversation[conversation.length - 1];
-    const waitingForAnswer = lastQuestion && lastQuestion.type === 'question';
-    const isMyTurn = currentActivePlayer === playerName;
-    const needsToAnswer = waitingForAnswer && lastQuestion.target === playerName;
-
+  if (gameData.state === 'setup') {
+    // Faza dodawania haseł
+    const myPlayer = gameData.players[playerName];
+    const allPlayers = Object.values(gameData.players);
+    const completedPlayers = allPlayers.filter(p => p.setupComplete).length;
+    
     return (
-      <div className="min-h-screen bg-gradient-to-br from-green-100 via-emerald-200 to-blue-200 p-6">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-center mb-6">
-            <h1 className="text-3xl font-bold text-gray-800 mb-2">🎯 Gra w Toku</h1>
-            <p className="text-gray-600">
-              {needsToAnswer 
-                ? `Odpowiadasz na pytanie od ${lastQuestion.player}...`
-                : waitingForAnswer 
-                ? `${lastQuestion.target} odpowiada na pytanie...`
-                : `Kolej gracza: ${currentActivePlayer}`
-              }
-            </p>
+      <div className="min-h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 p-6">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-8">
+            <h1 className="text-4xl font-bold text-white mb-4">📝 Dodawanie Haseł</h1>
+            <p className="text-blue-100">Każdy gracz dodaje swoje hasła do wspólnej puli</p>
+            <div className="text-yellow-300 font-semibold mt-2">
+              Gotowych graczy: {completedPlayers}/{allPlayers.length}
+            </div>
           </div>
 
-          <div className="grid lg:grid-cols-3 gap-6">
-            {/* Panel graczy i ich haseł */}
-            <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-6 border border-white/50 shadow-2xl">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">👥 Gracze i Hasła</h2>
-              <div className="space-y-3">
-                {playerNames.map((player) => (
-                  <div key={player} className="bg-gradient-to-r from-white/60 to-white/40 rounded-xl p-3 shadow-lg border border-white/30">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className={`font-medium ${player === currentActivePlayer ? 'text-emerald-700' : 'text-gray-800'}`}>
-                        {player} {player === currentActivePlayer ? '(aktywny)' : ''}
-                      </span>
-                      <button
-                        onClick={() => togglePasswordVisibility(player)}
-                        className="text-blue-600 hover:text-blue-800 transition-colors"
-                      >
-                        {showPasswords[player] ? <EyeOff size={16} /> : <Eye size={16} />}
-                      </button>
-                    </div>
-                    <div className="text-sm">
-                      {showPasswords[player] ? (
-                        <span className="text-purple-700 font-medium">Hasło: {gameData.assignedPasswords?.[player]}</span>
+          <div className="grid md:grid-cols-2 gap-8">
+            {/* Panel dodawania haseł */}
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+              <h2 className="text-2xl font-semibold text-white mb-6">Twoje Hasła</h2>
+              
+              {myPlayer?.setupComplete ? (
+                <div className="text-center py-8">
+                  <Check className="mx-auto text-green-400 mb-4" size={48} />
+                  <h3 className="text-xl font-semibold text-green-300 mb-2">Hasła Zapisane!</h3>
+                  <p className="text-blue-200">Dodałeś {myPlayer.passwords?.length || 0} haseł</p>
+                  <div className="mt-4 space-y-2">
+                    {myPlayer.passwords?.map((password, index) => (
+                      <div key={index} className="bg-white/20 rounded-lg px-3 py-2 text-white">
+                        {password}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    value={myPasswords}
+                    onChange={(e) => setMyPasswords(e.target.value)}
+                    placeholder="Wpisz swoje hasła, każde w nowej linii:&#10;Samochód&#10;Książka&#10;Telefon&#10;..."
+                    rows={10}
+                    className="w-full px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none mb-4"
+                  />
+                  <p className="text-blue-200 text-sm mb-4">
+                    {myPasswords.split('\n').filter(p => p.trim()).length} haseł
+                  </p>
+                  <button
+                    onClick={saveMyPasswords}
+                    className="w-full px-6 py-4 bg-green-500 hover:bg-green-600 text-white rounded-xl font-bold text-lg transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Plus size={20} />
+                    Zapisz Hasła
+                  </button>
+                </>
+              )}
+            </div>
+
+            {/* Status innych graczy */}
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+              <h2 className="text-2xl font-semibold text-white mb-6">Status Graczy</h2>
+              
+              <div className="space-y-3 mb-6">
+                {allPlayers.map((player) => (
+                  <div key={player.name} className="flex items-center justify-between bg-white/20 rounded-lg px-4 py-3">
+                    <span className="text-white font-medium flex items-center gap-2">
+                      {player.isHost && <Crown size={16} className="text-yellow-300" />}
+                      {player.name}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {player.setupComplete ? (
+                        <>
+                          <Check className="text-green-400" size={16} />
+                          <span className="text-green-300 text-sm">
+                            {player.passwords?.length || 0} haseł
+                          </span>
+                        </>
                       ) : (
-                        <span className="text-gray-600">Hasło ukryte</span>
+                        <span className="text-yellow-300 text-sm">Dodaje hasła...</span>
                       )}
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
 
-            {/* Panel pytań i odpowiedzi */}
-            <div className="lg:col-span-2 bg-white/70 backdrop-blur-xl rounded-3xl p-6 border border-white/50 shadow-2xl">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">💬 Rozmowa</h2>
-              
-              {/* Historia rozmowy */}
-              <div className="bg-gradient-to-br from-white/80 to-white/60 rounded-xl p-4 mb-6 h-64 overflow-y-auto shadow-inner border border-white/40">
-                {conversation.length === 0 ? (
-                  <p className="text-gray-600 text-center">Zadaj pierwsze pytanie, aby rozpocząć grę!</p>
-                ) : (
-                  <div className="space-y-3">
-                    {conversation.map((entry, index) => (
-                      <div key={index} className="border-b border-gray-200 pb-2">
-                        <div className="text-gray-800 font-medium">
-                          {entry.player} → {entry.target}: {entry.question}
-                        </div>
-                        {entry.answer && (
-                          <div className="text-blue-700 ml-4 mt-1">
-                            Odpowiedź: {entry.answer}
-                          </div>
-                        )}
-                        {entry.type === 'win' && (
-                          <div className="text-green-700 ml-4 mt-1 font-bold">
-                            🎉 WYGRAŁ!
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {isHost && completedPlayers === allPlayers.length && (
+                <button
+                  onClick={startGame}
+                  className="w-full px-6 py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-bold text-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  <Play size={20} />
+                  Rozpocznij Grę!
+                </button>
+              )}
 
-              {/* Interface zadawania pytań lub odpowiadania */}
-              {needsToAnswer ? (
-                <div className="space-y-4">
-                  <div className="bg-gradient-to-r from-yellow-100 to-amber-100 border border-yellow-300 rounded-xl p-4 shadow-lg">
-                    <p className="text-amber-700 font-medium mb-2">
-                      Pytanie od {lastQuestion.player}:
-                    </p>
-                    <p className="text-gray-800">{lastQuestion.question}</p>
-                  </div>
-                  
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={answerText}
-                      onChange={(e) => setAnswerText(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && answerQuestion(answerText)}
-                      placeholder="Twoja odpowiedź..."
-                      className="flex-1 px-4 py-3 rounded-xl bg-white/60 text-gray-800 placeholder-gray-500 border border-gray-300 focus:outline-none focus:ring-3 focus:ring-blue-400 focus:border-blue-400 shadow-lg"
-                    />
-                    <button
-                      onClick={() => answerQuestion(answerText)}
-                      disabled={!answerText.trim()}
-                      className="px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-xl transition-all duration-300 shadow-lg transform hover:-translate-y-0.5"
-                    >
-                      <Send size={20} />
-                    </button>
-                  </div>
-                </div>
-              ) : !waitingForAnswer && isMyTurn ? (
-                <div className="space-y-4">
-                  <p className="text-emerald-700 font-medium">Twoja kolej! Zadaj pytanie:</p>
-                  
-                  <select
-                    value={targetPlayer}
-                    onChange={(e) => setTargetPlayer(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl bg-white/60 text-gray-800 border border-gray-300 focus:outline-none focus:ring-3 focus:ring-blue-400 focus:border-blue-400 shadow-lg"
-                  >
-                    <option value="">Wybierz gracza...</option>
-                    {playerNames.filter(name => name !== playerName).map(name => (
-                      <option key={name} value={name} className="text-black">{name}</option>
-                    ))}
-                  </select>
-
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={currentQuestion}
-                      onChange={(e) => setCurrentQuestion(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && askQuestion()}
-                      placeholder="Zadaj pytanie..."
-                      className="flex-1 px-4 py-3 rounded-xl bg-white/60 text-gray-800 placeholder-gray-500 border border-gray-300 focus:outline-none focus:ring-3 focus:ring-blue-400 focus:border-blue-400 shadow-lg"
-                    />
-                    <button
-                      onClick={askQuestion}
-                      disabled={!currentQuestion.trim() || !targetPlayer}
-                      className="px-6 py-3 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-xl transition-all duration-300 shadow-lg transform hover:-translate-y-0.5"
-                    >
-                      <Send size={20} />
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-center py-8">
-                  <MessageCircle className="mx-auto text-gray-500 mb-2" size={32} />
-                  <p className="text-gray-600">
-                    {waitingForAnswer ? 'Czekamy na odpowiedź...' : 'Czekaj na swoją kolej...'}
+              {!isHost && (
+                <div className="text-center">
+                  <p className="text-blue-200">
+                    Gdy wszyscy skończą, host rozpocznie grę
                   </p>
                 </div>
               )}
@@ -566,34 +579,250 @@ export default function MultiplayerGame() {
     );
   }
 
+  if (gameData.state === 'playing') {
+    // Gra w toku
+    const playerNames = Object.keys(gameData.players);
+    const currentActivePlayer = playerNames[gameData.activePlayerIndex];
+    const questions = Object.values(gameData.questions || {}).sort((a, b) => b.timestamp - a.timestamp);
+    const currentQuestion = gameData.currentQuestionId ? gameData.questions[gameData.currentQuestionId] : null;
+    const isMyTurn = currentActivePlayer === playerName;
+    const needsToAnswer = currentQuestion && !currentQuestion.answers[playerName] && currentQuestion.player !== playerName;
+    const myQuestions = questions.filter(q => q.player === playerName);
+
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-green-600 via-blue-600 to-purple-600 p-6">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-6">
+            <h1 className="text-3xl font-bold text-white mb-2">🎯 Gra w Toku</h1>
+            <p className="text-blue-100">
+              {needsToAnswer 
+                ? `Odpowiedz na pytanie od ${currentQuestion.player}`
+                : currentQuestion && !currentQuestion.isComplete
+                ? `Czekamy na odpowiedzi...`
+                : `Kolej gracza: ${currentActivePlayer}`
+              }
+            </p>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex justify-center mb-6">
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-2 border border-white/20">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setActiveTab('game')}
+                  className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 ${
+                    activeTab === 'game' 
+                      ? 'bg-blue-500 text-white' 
+                      : 'text-blue-200 hover:text-white'
+                  }`}
+                >
+                  <Target size={16} />
+                  Gra
+                </button>
+                <button
+                  onClick={() => setActiveTab('passwords')}
+                  className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 ${
+                    activeTab === 'passwords' 
+                      ? 'bg-blue-500 text-white' 
+                      : 'text-blue-200 hover:text-white'
+                  }`}
+                >
+                  <Eye size={16} />
+                  Hasła
+                </button>
+                <button
+                  onClick={() => setActiveTab('history')}
+                  className={`px-4 py-2 rounded-xl transition-colors flex items-center gap-2 ${
+                    activeTab === 'history' 
+                      ? 'bg-blue-500 text-white' 
+                      : 'text-blue-200 hover:text-white'
+                  }`}
+                >
+                  <History size={16} />
+                  Moje Pytania ({myQuestions.length})
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {activeTab === 'game' && (
+            <div className="space-y-6">
+              {/* Aktualne pytanie */}
+              {currentQuestion && (
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+                  <h2 className="text-xl font-semibold text-white mb-4">
+                    Pytanie od {currentQuestion.player}:
+                  </h2>
+                  <div className="bg-blue-500/20 border border-blue-500/50 rounded-xl p-4 mb-4">
+                    <p className="text-white text-lg">{currentQuestion.question}</p>
+                  </div>
+
+                  {needsToAnswer ? (
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={answerText}
+                        onChange={(e) => setAnswerText(e.target.value)}
+                        onKeyPress={(e) => e.key === 'Enter' && answerQuestion(currentQuestion.id, answerText)}
+                        placeholder="Twoja odpowiedź..."
+                        className="flex-1 px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                      />
+                      <button
+                        onClick={() => answerQuestion(currentQuestion.id, answerText)}
+                        disabled={!answerText.trim()}
+                        className="px-6 py-3 bg-green-500 hover:bg-green-600 disabled:bg-gray-500 text-white rounded-xl transition-colors"
+                      >
+                        <Send size={20} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <h3 className="text-white font-medium">Odpowiedzi:</h3>
+                      {playerNames
+                        .filter(name => name !== currentQuestion.player)
+                        .map(name => (
+                          <div key={name} className="bg-white/20 rounded-lg px-4 py-2 flex justify-between">
+                            <span className="text-white font-medium">{name}:</span>
+                            <span className="text-blue-300">
+                              {currentQuestion.answers[name] || 'Jeszcze nie odpowiedział...'}
+                            </span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Interface zadawania pytań */}
+              {!currentQuestion && isMyTurn && (
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+                  <h2 className="text-xl font-semibold text-white mb-4">Twoja kolej! Zadaj pytanie:</h2>
+                  <p className="text-blue-200 mb-4">
+                    Twoje hasło: <span className="text-yellow-300 font-bold">
+                      {gameData.players[playerName]?.assignedPassword}
+                    </span>
+                  </p>
+                  
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={currentQuestion}
+                      onChange={(e) => setCurrentQuestion(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && askQuestion()}
+                      placeholder="Zadaj pytanie do wszystkich..."
+                      className="flex-1 px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                    />
+                    <button
+                      onClick={askQuestion}
+                      disabled={!currentQuestion.trim()}
+                      className="px-6 py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-500 text-white rounded-xl transition-colors"
+                    >
+                      <Send size={20} />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!currentQuestion && !isMyTurn && (
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20 text-center">
+                  <MessageCircle className="mx-auto text-blue-300 mb-2" size={32} />
+                  <p className="text-blue-200">Czekaj na swoją kolej...</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'passwords' && (
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+              <h2 className="text-xl font-semibold text-white mb-6">🔍 Hasła Przeciwników</h2>
+              <div className="grid md:grid-cols-2 gap-4">
+                {playerNames
+                  .filter(name => name !== playerName)
+                  .map((player) => (
+                    <div key={player} className="bg-white/20 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-white font-medium">{player}</span>
+                        <button
+                          onClick={() => togglePasswordVisibility(player)}
+                          className="text-blue-300 hover:text-blue-100"
+                        >
+                          {showPasswords[player] ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                      <div className="text-sm">
+                        {showPasswords[player] ? (
+                          <span className="text-yellow-300 font-medium">
+                            {gameData.players[player]?.assignedPassword}
+                          </span>
+                        ) : (
+                          <span className="text-blue-200">Hasło ukryte</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
+              <h2 className="text-xl font-semibold text-white mb-6">📝 Moje Pytania i Odpowiedzi</h2>
+              {myQuestions.length === 0 ? (
+                <p className="text-blue-200 text-center">Nie zadałeś jeszcze żadnych pytań</p>
+              ) : (
+                <div className="space-y-4">
+                  {myQuestions.map((question) => (
+                    <div key={question.id} className="bg-white/20 rounded-lg p-4">
+                      <div className="text-white font-medium mb-2">
+                        Pytanie: {question.question}
+                      </div>
+                      <div className="space-y-1">
+                        {playerNames
+                          .filter(name => name !== playerName)
+                          .map(name => (
+                            <div key={name} className="text-sm flex justify-between">
+                              <span className="text-blue-300">{name}:</span>
+                              <span className="text-white">
+                                {question.answers[name] || 'Brak odpowiedzi'}
+                              </span>
+                            </div>
+                          ))}
+                      </div>
+                      <div className="text-xs text-blue-400 mt-2">
+                        Status: {question.isComplete ? 'Wszyscy odpowiedzieli' : 'Oczekuje na odpowiedzi'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (gameData.state === 'finished') {
     // Koniec gry
     return (
-      <div className="min-h-screen bg-gradient-to-br from-yellow-100 via-orange-200 to-pink-200 p-6">
+      <div className="min-h-screen bg-gradient-to-br from-yellow-400 via-orange-500 to-red-500 p-6">
         <div className="max-w-4xl mx-auto text-center">
-          <div className="bg-white/70 backdrop-blur-xl rounded-3xl p-8 border border-white/50 shadow-2xl">
-            <Trophy className="mx-auto text-yellow-600 mb-4" size={64} />
-            <h1 className="text-4xl font-bold text-gray-800 mb-4">🎉 Koniec Gry!</h1>
-            <h2 className="text-3xl font-semibold text-purple-700 mb-6">
+          <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-8 border border-white/20">
+            <Trophy className="mx-auto text-yellow-300 mb-4" size={64} />
+            <h1 className="text-4xl font-bold text-white mb-4">🎉 Koniec Gry!</h1>
+            <h2 className="text-3xl font-semibold text-yellow-300 mb-6">
               Wygrał: {gameData.winner}!
             </h2>
             
-            <div className="bg-gradient-to-br from-white/80 to-white/60 rounded-xl p-6 mb-6 shadow-inner border border-white/40">
-              <h3 className="text-xl font-semibold text-gray-800 mb-4">Historia Gry</h3>
-              <div className="space-y-3 text-left">
-                {Object.values(gameData.conversation || {}).sort((a, b) => a.timestamp - b.timestamp).map((entry, index) => (
-                  <div key={index} className="bg-white/60 rounded-lg p-3 border border-white/30 shadow-lg">
-                    {entry.type === 'win' ? (
-                      <div className="text-purple-700 font-bold">
-                        {entry.player}: {entry.question}
-                        <div className="text-green-700">{entry.answer}</div>
-                      </div>
-                    ) : (
-                      <div className="text-gray-800">
-                        <div className="font-medium">{entry.player} → {entry.target}: {entry.question}</div>
-                        {entry.answer && <div className="text-blue-700 ml-4">Odpowiedź: {entry.answer}</div>}
-                      </div>
-                    )}
+            <div className="bg-white/20 rounded-xl p-6 mb-6">
+              <h3 className="text-xl font-semibold text-white mb-4">Hasła w grze</h3>
+              <div className="grid md:grid-cols-2 gap-4">
+                {Object.entries(gameData.players).map(([name, player]) => (
+                  <div key={name} className="bg-white/20 rounded-lg p-3">
+                    <div className="text-white font-medium">{name}</div>
+                    <div className="text-yellow-300">
+                      Hasło: {player.assignedPassword}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -601,7 +830,7 @@ export default function MultiplayerGame() {
 
             <button
               onClick={resetGame}
-              className="px-8 py-4 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white rounded-2xl text-xl font-bold transition-all duration-300 shadow-xl hover:shadow-2xl transform hover:-translate-y-1"
+              className="px-8 py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-2xl text-xl font-bold transition-colors"
             >
               Nowa Gra
             </button>
