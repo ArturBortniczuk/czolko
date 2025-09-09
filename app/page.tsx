@@ -318,7 +318,7 @@ export default function MultiplayerGame() {
     if (!question) return;
 
     const updatedAnswers = {
-      ...question.answers,
+      ...(question.answers || {}),
       [playerName]: answer
     };
 
