@@ -50,8 +50,8 @@ export default function MultiplayerGame() {
   // Stan setup
   const [myPasswords, setMyPasswords] = useState<string>('');
   
-  // Stan gry
-  const [currentQuestion, setCurrentQuestion] = useState<string>('');
+  // Stan gry - zmieniono nazwę na questionInput żeby uniknąć konfliktu
+  const [questionInput, setQuestionInput] = useState<string>('');
   const [answerText, setAnswerText] = useState<string>('');
   const [showPasswords, setShowPasswords] = useState<{ [key: string]: boolean }>({});
   const [activeTab, setActiveTab] = useState<'game' | 'passwords' | 'history'>('game');
@@ -222,7 +222,7 @@ export default function MultiplayerGame() {
 
   // Zadawanie pytania
   const askQuestion = async () => {
-    if (!currentQuestion.trim() || !gameData) return;
+    if (!questionInput.trim() || !gameData) return;
 
     const questionId = Date.now().toString();
     const playerNames = Object.keys(gameData.players);
@@ -230,7 +230,7 @@ export default function MultiplayerGame() {
     // Sprawdź czy gracz zgadł hasło
     const myPassword = gameData.players[playerName]?.assignedPassword || '';
     const foundWords = myPassword.toLowerCase().split(' ');
-    const questionWords = currentQuestion.toLowerCase().split(' ');
+    const questionWords = questionInput.toLowerCase().split(' ');
     const foundWord = foundWords.find(word => 
       questionWords.some(qWord => qWord.includes(word) && word.length > 2)
     );
@@ -250,7 +250,7 @@ export default function MultiplayerGame() {
     const newQuestion: Question = {
       id: questionId,
       player: playerName,
-      question: currentQuestion,
+      question: questionInput,
       answers: {},
       timestamp: Date.now(),
       isComplete: false
@@ -268,7 +268,7 @@ export default function MultiplayerGame() {
     };
 
     await gameUtils.updateGameState(gameCode, updatedGameData);
-    setCurrentQuestion('');
+    setQuestionInput('');
   };
 
   // Odpowiadanie na pytanie
@@ -334,6 +334,7 @@ export default function MultiplayerGame() {
     setMyPasswords('');
     setShowPasswords({});
     setActiveTab('game');
+    setQuestionInput('');
   };
 
   if (!gameCode) {
@@ -584,9 +585,9 @@ export default function MultiplayerGame() {
     const playerNames = Object.keys(gameData.players);
     const currentActivePlayer = playerNames[gameData.activePlayerIndex];
     const questions = Object.values(gameData.questions || {}).sort((a, b) => b.timestamp - a.timestamp);
-    const currentQuestion = gameData.currentQuestionId ? gameData.questions[gameData.currentQuestionId] : null;
+    const activeQuestion = gameData.currentQuestionId ? gameData.questions[gameData.currentQuestionId] : null;
     const isMyTurn = currentActivePlayer === playerName;
-    const needsToAnswer = currentQuestion && !currentQuestion.answers[playerName] && currentQuestion.player !== playerName;
+    const needsToAnswer = activeQuestion && !activeQuestion.answers[playerName] && activeQuestion.player !== playerName;
     const myQuestions = questions.filter(q => q.player === playerName);
 
     return (
@@ -596,8 +597,8 @@ export default function MultiplayerGame() {
             <h1 className="text-3xl font-bold text-white mb-2">🎯 Gra w Toku</h1>
             <p className="text-blue-100">
               {needsToAnswer 
-                ? `Odpowiedz na pytanie od ${currentQuestion.player}`
-                : currentQuestion && !currentQuestion.isComplete
+                ? `Odpowiedz na pytanie od ${activeQuestion.player}`
+                : activeQuestion && !activeQuestion.isComplete
                 ? `Czekamy na odpowiedzi...`
                 : `Kolej gracza: ${currentActivePlayer}`
               }
@@ -648,13 +649,13 @@ export default function MultiplayerGame() {
           {activeTab === 'game' && (
             <div className="space-y-6">
               {/* Aktualne pytanie */}
-              {currentQuestion && (
+              {activeQuestion && (
                 <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
                   <h2 className="text-xl font-semibold text-white mb-4">
-                    Pytanie od {currentQuestion.player}:
+                    Pytanie od {activeQuestion.player}:
                   </h2>
                   <div className="bg-blue-500/20 border border-blue-500/50 rounded-xl p-4 mb-4">
-                    <p className="text-white text-lg">{currentQuestion.question}</p>
+                    <p className="text-white text-lg">{activeQuestion.question}</p>
                   </div>
 
                   {needsToAnswer ? (
@@ -663,12 +664,12 @@ export default function MultiplayerGame() {
                         type="text"
                         value={answerText}
                         onChange={(e) => setAnswerText(e.target.value)}
-                        onKeyPress={(e) => e.key === 'Enter' && answerQuestion(currentQuestion.id, answerText)}
+                        onKeyPress={(e) => e.key === 'Enter' && answerQuestion(activeQuestion.id, answerText)}
                         placeholder="Twoja odpowiedź..."
                         className="flex-1 px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300"
                       />
                       <button
-                        onClick={() => answerQuestion(currentQuestion.id, answerText)}
+                        onClick={() => answerQuestion(activeQuestion.id, answerText)}
                         disabled={!answerText.trim()}
                         className="px-6 py-3 bg-green-500 hover:bg-green-600 disabled:bg-gray-500 text-white rounded-xl transition-colors"
                       >
@@ -679,12 +680,12 @@ export default function MultiplayerGame() {
                     <div className="space-y-2">
                       <h3 className="text-white font-medium">Odpowiedzi:</h3>
                       {playerNames
-                        .filter(name => name !== currentQuestion.player)
+                        .filter(name => name !== activeQuestion.player)
                         .map(name => (
                           <div key={name} className="bg-white/20 rounded-lg px-4 py-2 flex justify-between">
                             <span className="text-white font-medium">{name}:</span>
                             <span className="text-blue-300">
-                              {currentQuestion.answers[name] || 'Jeszcze nie odpowiedział...'}
+                              {activeQuestion.answers[name] || 'Jeszcze nie odpowiedział...'}
                             </span>
                           </div>
                         ))}
@@ -694,7 +695,7 @@ export default function MultiplayerGame() {
               )}
 
               {/* Interface zadawania pytań */}
-              {!currentQuestion && isMyTurn && (
+              {!activeQuestion && isMyTurn && (
                 <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
                   <h2 className="text-xl font-semibold text-white mb-4">Twoja kolej! Zadaj pytanie:</h2>
                   <p className="text-blue-200 mb-4">
@@ -706,15 +707,15 @@ export default function MultiplayerGame() {
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      value={currentQuestion || ''}
-                      onChange={(e) => setCurrentQuestion(e.target.value)}
+                      value={questionInput}
+                      onChange={(e) => setQuestionInput(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && askQuestion()}
                       placeholder="Zadaj pytanie do wszystkich..."
                       className="flex-1 px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300"
                     />
                     <button
                       onClick={askQuestion}
-                      disabled={!currentQuestion.trim()}
+                      disabled={!questionInput.trim()}
                       className="px-6 py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-500 text-white rounded-xl transition-colors"
                     >
                       <Send size={20} />
@@ -723,7 +724,7 @@ export default function MultiplayerGame() {
                 </div>
               )}
 
-              {!currentQuestion && !isMyTurn && (
+              {!activeQuestion && !isMyTurn && (
                 <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20 text-center">
                   <MessageCircle className="mx-auto text-blue-300 mb-2" size={32} />
                   <p className="text-blue-200">Czekaj na swoją kolej...</p>
