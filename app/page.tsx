@@ -51,7 +51,7 @@ export default function MultiplayerGame() {
   const [myPasswords, setMyPasswords] = useState('');
   
   // Stan gry
-  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [questionText, setQuestionText] = useState('');
   const [answerText, setAnswerText] = useState('');
   const [showPasswords, setShowPasswords] = useState<{ [key: string]: boolean }>({});
   const [activeTab, setActiveTab] = useState<'game' | 'passwords' | 'history'>('game');
