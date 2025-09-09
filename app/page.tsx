@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { database, gameUtils } from '../lib/firebase';
-import { ref, onValue, off, push, set } from 'firebase/database';
+import { ref, onValue, off } from 'firebase/database';
 import { 
   Play, Users, Eye, EyeOff, Trophy, Copy, Check, 
   MessageCircle, Send, Crown, UserPlus, Plus, History, Target
@@ -14,7 +14,7 @@ interface Player {
   name: string;
   isHost: boolean;
   joinedAt: number;
-  passwords: string[];
+  passwords?: string[];
   assignedPassword?: string;
   setupComplete?: boolean;
 }
@@ -32,27 +32,27 @@ interface GameData {
   host: string;
   state: GameState;
   players: { [key: string]: Player };
-  questions: { [id: string]: Question };
-  activePlayerIndex: number;
-  winner: string | null;
+  questions?: { [id: string]: Question };
+  activePlayerIndex?: number;
+  winner?: string | null;
   currentQuestionId?: string;
 }
 
 export default function MultiplayerGame() {
   // Stan lokalny
-  const [gameCode, setGameCode] = useState('');
-  const [playerName, setPlayerName] = useState('');
-  const [joinCode, setJoinCode] = useState('');
-  const [isHost, setIsHost] = useState(false);
+  const [gameCode, setGameCode] = useState<string>('');
+  const [playerName, setPlayerName] = useState<string>('');
+  const [joinCode, setJoinCode] = useState<string>('');
+  const [isHost, setIsHost] = useState<boolean>(false);
   const [gameData, setGameData] = useState<GameData | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<boolean>(false);
   
   // Stan setup
-  const [myPasswords, setMyPasswords] = useState('');
+  const [myPasswords, setMyPasswords] = useState<string>('');
   
   // Stan gry
-  const [questionText, setQuestionText] = useState('');
-  const [answerText, setAnswerText] = useState('');
+  const [questionText, setQuestionText] = useState<string>('');
+  const [answerText, setAnswerText] = useState<string>('');
   const [showPasswords, setShowPasswords] = useState<{ [key: string]: boolean }>({});
   const [activeTab, setActiveTab] = useState<'game' | 'passwords' | 'history'>('game');
 
@@ -62,7 +62,7 @@ export default function MultiplayerGame() {
 
     const gameRef = ref(database, `games/${gameCode}`);
     const unsubscribe = onValue(gameRef, (snapshot) => {
-      const data = snapshot.val();
+      const data = snapshot.val() as GameData | null;
       if (data) {
         setGameData(data);
       }
@@ -72,7 +72,7 @@ export default function MultiplayerGame() {
   }, [gameCode]);
 
   // Tworzenie nowej gry
-  const createGame = async () => {
+  const createGame = async (): Promise<void> => {
     if (!playerName.trim()) {
       alert('Wpisz swój nick!');
       return;
@@ -89,7 +89,7 @@ export default function MultiplayerGame() {
   };
 
   // Dołączanie do gry
-  const joinGame = async () => {
+  const joinGame = async (): Promise<void> => {
     if (!playerName.trim() || !joinCode.trim()) {
       alert('Wpisz nick i kod gry!');
       return;
@@ -106,15 +106,17 @@ export default function MultiplayerGame() {
   };
 
   // Kopiowanie kodu gry
-  const copyGameCode = async () => {
-    await navigator.clipboard.writeText(gameCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const copyGameCode = async (): Promise<void> => {
+    if (gameCode) {
+      await navigator.clipboard.writeText(gameCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   // Przejście do fazy setup
-  const moveToSetup = async () => {
-    if (!gameData || !isHost || !gameData.players) return;
+  const moveToSetup = async (): Promise<void> => {
+    if (!gameData || !isHost) return;
     
     const playerCount = Object.keys(gameData.players).length;
     if (playerCount < 2) {
@@ -122,17 +124,17 @@ export default function MultiplayerGame() {
       return;
     }
 
-    const updatedGameData = {
+    const updatedGameData: GameData = {
       ...gameData,
-      state: 'setup' as GameState
+      state: 'setup'
     };
 
     await gameUtils.updateGameState(gameCode, updatedGameData);
   };
 
   // Zapisywanie haseł gracza
-  const saveMyPasswords = async () => {
-    if (!gameData || !gameData.players || !myPasswords.trim()) {
+  const saveMyPasswords = async (): Promise<void> => {
+    if (!gameData || !myPasswords.trim()) {
       alert('Wpisz przynajmniej jedno hasło!');
       return;
     }
@@ -153,21 +155,25 @@ export default function MultiplayerGame() {
       return;
     }
 
-    const playerRef = ref(database, `games/${gameCode}/players/${playerName}`);
-    await set(playerRef, {
-      ...currentPlayer,
-      passwords: passwords,
-      setupComplete: true
-    });
+    try {
+      await gameUtils.updatePlayer(gameCode, playerName, {
+        ...currentPlayer,
+        passwords: passwords,
+        setupComplete: true
+      });
+    } catch (error) {
+      console.error('Błąd zapisywania haseł:', error);
+      alert('Błąd zapisywania haseł!');
+    }
   };
 
   // Rozpoczęcie gry (gdy wszyscy skończyli setup)
-  const startGame = async () => {
-    if (!gameData || !isHost || !gameData.players) return;
+  const startGame = async (): Promise<void> => {
+    if (!gameData || !isHost) return;
 
     // Sprawdź czy wszyscy gracze skończyli setup
     const players = Object.values(gameData.players);
-    const allComplete = players.every(p => p.setupComplete);
+    const allComplete = players.every(p => p.setupComplete === true);
     
     if (!allComplete) {
       alert('Nie wszyscy gracze skończyli dodawanie haseł!');
@@ -195,12 +201,12 @@ export default function MultiplayerGame() {
     // Przypisz hasła graczom (każdy dostaje hasło innego gracza)
     const playerNames = Object.keys(gameData.players);
     const updatedPlayers = { ...gameData.players };
-    const availablePasswords = [...allPasswords]; // kopia do modyfikacji
+    const availablePasswords = [...allPasswords];
     
-    playerNames.forEach(playerName => {
+    playerNames.forEach(pName => {
       // Znajdź hasła które NIE należą do tego gracza
       const playerAvailablePasswords = availablePasswords.filter(password => 
-        passwordOwners[password] !== playerName
+        passwordOwners[password] !== pName
       );
       
       if (playerAvailablePasswords.length > 0) {
@@ -208,8 +214,8 @@ export default function MultiplayerGame() {
         const randomIndex = Math.floor(Math.random() * playerAvailablePasswords.length);
         const randomPassword = playerAvailablePasswords[randomIndex];
         
-        updatedPlayers[playerName] = {
-          ...updatedPlayers[playerName],
+        updatedPlayers[pName] = {
+          ...updatedPlayers[pName],
           assignedPassword: randomPassword
         };
         
@@ -219,28 +225,35 @@ export default function MultiplayerGame() {
       }
     });
 
-    const updatedGameData = {
+    const updatedGameData: GameData = {
       ...gameData,
-      state: 'playing' as GameState,
+      state: 'playing',
       players: updatedPlayers,
       questions: {},
       activePlayerIndex: 0
     };
 
-    await gameUtils.updateGameState(gameCode, updatedGameData);
+    try {
+      await gameUtils.updateGameState(gameCode, updatedGameData);
+    } catch (error) {
+      console.error('Błąd rozpoczęcia gry:', error);
+      alert('Błąd rozpoczęcia gry!');
+    }
   };
 
   // Zadawanie pytania
-  const askQuestion = async () => {
-    if (!currentQuestion.trim() || !gameData) return;
+  const askQuestion = async (): Promise<void> => {
+    if (!questionText.trim() || !gameData) return;
 
     const questionId = Date.now().toString();
     
-    // Sprawdź czy gracz zgadł hasło - szukamy słów z hasła w pytaniu
-    const myPassword = gameData.players[playerName]?.assignedPassword || '';
+    // Sprawdź czy gracz zgadł hasło
+    const myPlayer = gameData.players[playerName];
+    const myPassword = myPlayer?.assignedPassword;
+    
     if (myPassword) {
       const passwordWords = myPassword.toLowerCase().split(/\s+/).filter(word => word.length > 2);
-      const questionWords = currentQuestion.toLowerCase().split(/\s+/);
+      const questionWords = questionText.toLowerCase().split(/\s+/);
       
       const foundPasswordWord = passwordWords.find(passwordWord => 
         questionWords.some(questionWord => 
@@ -250,13 +263,20 @@ export default function MultiplayerGame() {
 
       if (foundPasswordWord) {
         // Gracz wygrał!
-        const updatedGameData = {
+        const updatedGameData: GameData = {
           ...gameData,
-          state: 'finished' as GameState,
+          state: 'finished',
           winner: playerName
         };
-        await gameUtils.updateGameState(gameCode, updatedGameData);
-        return;
+        
+        try {
+          await gameUtils.updateGameState(gameCode, updatedGameData);
+          return;
+        } catch (error) {
+          console.error('Błąd zapisu wygranej:', error);
+          alert('Błąd zapisu wygranej!');
+          return;
+        }
       }
     }
 
@@ -264,29 +284,34 @@ export default function MultiplayerGame() {
     const newQuestion: Question = {
       id: questionId,
       player: playerName,
-      question: currentQuestion,
+      question: questionText,
       answers: {},
       timestamp: Date.now(),
       isComplete: false
     };
 
     const updatedQuestions = {
-      ...gameData.questions,
+      ...(gameData.questions || {}),
       [questionId]: newQuestion
     };
 
-    const updatedGameData = {
+    const updatedGameData: GameData = {
       ...gameData,
       questions: updatedQuestions,
       currentQuestionId: questionId
     };
 
-    await gameUtils.updateGameState(gameCode, updatedGameData);
-    setCurrentQuestion('');
+    try {
+      await gameUtils.updateGameState(gameCode, updatedGameData);
+      setQuestionText('');
+    } catch (error) {
+      console.error('Błąd zadawania pytania:', error);
+      alert('Błąd zadawania pytania!');
+    }
   };
 
   // Odpowiadanie na pytanie
-  const answerQuestion = async (questionId: string, answer: string) => {
+  const answerQuestion = async (questionId: string, answer: string): Promise<void> => {
     if (!gameData || !answer.trim() || !gameData.questions) return;
 
     const question = gameData.questions[questionId];
@@ -297,11 +322,11 @@ export default function MultiplayerGame() {
       [playerName]: answer
     };
 
-    const playerNames = Object.keys(gameData.players || {});
+    const playerNames = Object.keys(gameData.players);
     const expectedAnswerers = playerNames.filter(name => name !== question.player);
     const isComplete = expectedAnswerers.every(name => updatedAnswers[name]);
 
-    const updatedQuestion = {
+    const updatedQuestion: Question = {
       ...question,
       answers: updatedAnswers,
       isComplete
@@ -312,7 +337,7 @@ export default function MultiplayerGame() {
       [questionId]: updatedQuestion
     };
 
-    let updatedGameData = {
+    let updatedGameData: GameData = {
       ...gameData,
       questions: updatedQuestions
     };
@@ -328,12 +353,17 @@ export default function MultiplayerGame() {
       };
     }
 
-    await gameUtils.updateGameState(gameCode, updatedGameData);
-    setAnswerText('');
+    try {
+      await gameUtils.updateGameState(gameCode, updatedGameData);
+      setAnswerText('');
+    } catch (error) {
+      console.error('Błąd odpowiedzi na pytanie:', error);
+      alert('Błąd odpowiedzi na pytanie!');
+    }
   };
 
   // Przełączanie widoczności hasła
-  const togglePasswordVisibility = (player: string) => {
+  const togglePasswordVisibility = (player: string): void => {
     setShowPasswords(prev => ({
       ...prev,
       [player]: !prev[player]
@@ -341,13 +371,15 @@ export default function MultiplayerGame() {
   };
 
   // Reset gry
-  const resetGame = () => {
+  const resetGame = (): void => {
     setGameCode('');
     setGameData(null);
     setIsHost(false);
     setMyPasswords('');
     setShowPasswords({});
     setActiveTab('game');
+    setQuestionText('');
+    setAnswerText('');
   };
 
   if (!gameCode) {
@@ -432,8 +464,7 @@ export default function MultiplayerGame() {
 
   if (gameData.state === 'lobby') {
     // Lobby - czekanie na graczy
-    const players = gameData.players || {};
-    const playerCount = Object.keys(players).length;
+    const playerCount = Object.keys(gameData.players).length;
     
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-600 via-blue-600 to-teal-500 p-6">
@@ -461,7 +492,7 @@ export default function MultiplayerGame() {
             </div>
 
             <div className="space-y-3 mb-6">
-              {Object.values(players).map((player) => (
+              {Object.values(gameData.players).map((player) => (
                 <div key={player.name} className="flex items-center justify-between bg-white/20 rounded-lg px-4 py-3">
                   <span className="text-white font-medium flex items-center gap-2">
                     {player.isHost && <Crown size={16} className="text-yellow-300" />}
@@ -498,10 +529,9 @@ export default function MultiplayerGame() {
 
   if (gameData.state === 'setup') {
     // Faza dodawania haseł
-    const players = gameData.players || {};
-    const myPlayer = players[playerName];
-    const allPlayers = Object.values(players);
-    const completedPlayers = allPlayers.filter(p => p.setupComplete).length;
+    const myPlayer = gameData.players[playerName];
+    const allPlayers = Object.values(gameData.players);
+    const completedPlayers = allPlayers.filter(p => p.setupComplete === true).length;
     
     return (
       <div className="min-h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 p-6">
@@ -613,12 +643,12 @@ export default function MultiplayerGame() {
 
   if (gameData.state === 'playing') {
     // Gra w toku
-    const playerNames = Object.keys(gameData.players || {});
-    const currentActivePlayer = playerNames[gameData.activePlayerIndex] || playerNames[0];
+    const playerNames = Object.keys(gameData.players);
+    const currentActivePlayer = playerNames[gameData.activePlayerIndex || 0];
     const questions = Object.values(gameData.questions || {}).sort((a, b) => b.timestamp - a.timestamp);
     const currentQuestion = gameData.currentQuestionId && gameData.questions ? gameData.questions[gameData.currentQuestionId] : null;
     const isMyTurn = currentActivePlayer === playerName;
-    const needsToAnswer = currentQuestion && !currentQuestion.answers?.[playerName] && currentQuestion.player !== playerName;
+    const needsToAnswer = currentQuestion && !currentQuestion.answers[playerName] && currentQuestion.player !== playerName;
     const myQuestions = questions.filter(q => q.player === playerName);
 
     return (
@@ -721,7 +751,7 @@ export default function MultiplayerGame() {
                           <div key={name} className="bg-white/20 rounded-lg px-4 py-2 flex justify-between">
                             <span className="text-white font-medium">{name}:</span>
                             <span className="text-blue-300">
-                              {currentQuestion.answers?.[name] || 'Jeszcze nie odpowiedział...'}
+                              {currentQuestion.answers[name] || 'Jeszcze nie odpowiedział...'}
                             </span>
                           </div>
                         ))}
@@ -741,15 +771,15 @@ export default function MultiplayerGame() {
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      value={currentQuestion}
-                      onChange={(e) => setCurrentQuestion(e.target.value)}
+                      value={questionText}
+                      onChange={(e) => setQuestionText(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && askQuestion()}
                       placeholder="Zadaj pytanie do wszystkich..."
                       className="flex-1 px-4 py-3 rounded-xl bg-white/20 text-white placeholder-blue-200 border border-white/30 focus:outline-none focus:ring-2 focus:ring-blue-300"
                     />
                     <button
                       onClick={askQuestion}
-                      disabled={!currentQuestion.trim()}
+                      disabled={!questionText.trim()}
                       className="px-6 py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-500 text-white rounded-xl transition-colors"
                     >
                       <Send size={20} />
@@ -776,28 +806,31 @@ export default function MultiplayerGame() {
               <div className="grid md:grid-cols-2 gap-4">
                 {playerNames
                   .filter(name => name !== playerName)
-                  .map((player) => (
-                    <div key={player} className="bg-white/20 rounded-lg p-4">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-white font-medium">{player}</span>
-                        <button
-                          onClick={() => togglePasswordVisibility(player)}
-                          className="text-blue-300 hover:text-blue-100"
-                        >
-                          {showPasswords[player] ? <EyeOff size={16} /> : <Eye size={16} />}
-                        </button>
+                  .map((player) => {
+                    const playerData = gameData.players[player];
+                    return (
+                      <div key={player} className="bg-white/20 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-white font-medium">{player}</span>
+                          <button
+                            onClick={() => togglePasswordVisibility(player)}
+                            className="text-blue-300 hover:text-blue-100"
+                          >
+                            {showPasswords[player] ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                        <div className="text-sm">
+                          {showPasswords[player] ? (
+                            <span className="text-yellow-300 font-medium">
+                              {playerData?.assignedPassword || 'Brak hasła'}
+                            </span>
+                          ) : (
+                            <span className="text-blue-200">Kliknij oko aby zobaczyć</span>
+                          )}
+                        </div>
                       </div>
-                      <div className="text-sm">
-                        {showPasswords[player] ? (
-                          <span className="text-yellow-300 font-medium">
-                            {gameData.players[player]?.assignedPassword}
-                          </span>
-                        ) : (
-                          <span className="text-blue-200">Kliknij oko aby zobaczyć</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
               </div>
               
               {playerNames.length <= 1 && (
@@ -827,7 +860,7 @@ export default function MultiplayerGame() {
                             <div key={name} className="text-sm flex justify-between">
                               <span className="text-blue-300">{name}:</span>
                               <span className="text-white">
-                                {question.answers?.[name] || 'Brak odpowiedzi'}
+                                {question.answers[name] || 'Brak odpowiedzi'}
                               </span>
                             </div>
                           ))}
